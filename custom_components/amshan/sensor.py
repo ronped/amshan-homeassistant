@@ -520,6 +520,7 @@ class MeterMeasureProcessor:
         self._hass = hass
         self._async_add_entities = async_add_entities
         self._measure_queue = measure_queue
+        self._bundled_messages = None
         self._decoder: autodecoder.AutoDecoder = autodecoder.AutoDecoder()
         self._known_measures: set[str] = set()
         self._new_measure_signal_name: str | None = None
@@ -551,12 +552,32 @@ class MeterMeasureProcessor:
         self,
     ) -> dict[str, str | int | float | dt.datetime]:
         while True:
-            message = await self._measure_queue.get()
+            if self._bundled_messages:
+                # We have messages from bundled message
+                message = self._bundled_messages
+                if len(message.as_bytes) >= (59+115):
+                    # Assume next message is 59 or 60 bytes ahead skip 60 bytes
+                    # after the fourth active power import update
+                    skip_bytes = 59 if len(message.as_bytes) > (59+115) else 60
+                    self._bundled_messages = type(self._bundled_messages)(self._bundled_messages.as_bytes[skip_bytes:])
+                else:
+                    # Assume no more messages in bundle
+                    self._bundled_messages = None
+            else:
+                message = await self._measure_queue.get()
             if isinstance(message, StopMessage):
                 # stop signal reveived
                 return dict()
 
             try:
+                if message.as_bytes.startswith(bytes.fromhex("08dc")):
+                    # Special bundled messages from Tibber Pulse
+                    # First message in bundle seems to be at byte 31
+                    message = type(message)(message.as_bytes[31:])
+                    # Noticed that each message seems to be 59 bytes
+                    # long - not sure how we can actually detect the length
+                    # of the message though
+                    self._bundled_messages = type(message)(message.as_bytes[59:])
                 decoded_measure = self._decoder.decode_message(message)
                 if decoded_measure:
                     _LOGGER.debug("Decoded meter message: %s", decoded_measure)
